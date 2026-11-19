@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 辞書本体は含めない(配布元の利用条件に従い、実行時に取得する)
+wago.121808.pn
+pn.csv.m3.120408.trim
+.cache/
