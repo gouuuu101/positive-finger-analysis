@@ -642,8 +642,8 @@ def event_similarity(tokens, events):
     return best, best_text
 
 
-def check_sarcasm(tokens, hits, events, threshold=0.7):
-    """皮肉の可能性があるか。ポジティブな表現があり、かつ、皮肉の目印か、ネガティブな出来事との類似がある場合。
+def check_sarcasm(tokens, hits, polarity, events, threshold=0.7):
+    """皮肉の可能性があるか。全体スコアではなく、表現の対立も手掛かりにする。
     戻り値: (可能性あり?, 理由のリスト)"""
     if not any(h[2] > 0 for h in hits):
         return False, []
@@ -651,6 +651,27 @@ def check_sarcasm(tokens, hits, events, threshold=0.7):
     marks = ({t[0] for t in tokens} | {t[1] for t in tokens}) & SARCASM_MARKERS
     if marks:
         reasons.append(f"「{sorted(marks)[0]}」という表現がある")
+
+    # 実験ルール: 「ネガティブな語 + 逆接 + ポジティブな語」の並びを拾う。
+    # 文全体の合計スコアが正でも、後半のポジ語が強くても、この対立は消さない。
+    contrast_at = last_contrast_index(tokens)
+    if contrast_at >= 0:
+        # 否定は反映するが、逆接後の倍率や文全体の合計は使わない。
+        left_negative = False
+        right_positive = False
+        for idx, (surface, base, _pos) in enumerate(tokens):
+            raw = polarity.get(base) or polarity.get(surface)
+            if raw is None:
+                continue
+            negs = count_negations(tokens, idx)
+            effective = -raw if negs % 2 else raw
+            if idx < contrast_at and effective < 0:
+                left_negative = True
+            elif idx > contrast_at and effective > 0:
+                right_positive = True
+        if left_negative and right_positive:
+            reasons.append("逆接の前にネガティブ表現、後ろにポジティブ表現がある")
+
     best, text = event_similarity(tokens, events)
     if best >= threshold:
         reasons.append(f"ネガティブな出来事「{text}」に似ている(類似度 {best:.2f})")
@@ -661,8 +682,8 @@ def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2, s
     tokens = tokenize(text)
     label, total, hits = judge(tokens, polarity, contrast_weight)
     surface_label, reasons = label, []
-    if sarcasm and sarcasm["mode"] != "off" and total >= 0:
-        suspected, reasons = check_sarcasm(tokens, hits, sarcasm["events"], sarcasm["threshold"])
+    if sarcasm and sarcasm["mode"] != "off":
+        suspected, reasons = check_sarcasm(tokens, hits, polarity, sarcasm["events"], sarcasm["threshold"])
         if suspected:
             label = "ネガティブ(皮肉の可能性)" if sarcasm["mode"] == "negative" else "皮肉の可能性あり"
     print(f"入力: {text}")
