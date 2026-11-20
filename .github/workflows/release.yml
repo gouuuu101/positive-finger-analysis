@@ -28,6 +28,7 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: positive-judge
     env:
       PYTHONUTF8: "1"
     steps:
@@ -42,6 +43,8 @@ jobs:
 
       - name: Download dictionary (bundled into the executable)
         run: |
+          mkdir -p positive_judge_data
+          touch positive_judge_data/__init__.py
           python - <<'PY'
           import urllib.request
           base = "https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/"
@@ -74,10 +77,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: positive-judge-${{ matrix.label }}
-          path: out/*
+          path: positive-judge/out/*
 
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: out/*
+          files: positive-judge/out/*
