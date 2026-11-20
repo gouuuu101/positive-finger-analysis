@@ -1,0 +1,83 @@
+name: Build executables
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            exe: dist/positive-judge.exe
+          - os: macos-latest
+            label: macos
+            exe: dist/positive-judge
+          - os: ubuntu-latest
+            label: linux
+            exe: dist/positive-judge
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install janome pyinstaller
+
+      - name: Download dictionary (bundled into the executable)
+        run: |
+          python - <<'PY'
+          import urllib.request
+          base = "https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/"
+          for name in ("wago.121808.pn", "pn.csv.m3.120408.trim"):
+              urllib.request.urlretrieve(base + name, "positive_judge_data/" + name)
+              print("downloaded", name)
+          PY
+          ls -l positive_judge_data
+
+      - name: Build executable
+        run: pyinstaller --onefile --name positive-judge --collect-all janome --collect-all positive_judge_data positive_judge.py
+
+      - name: Smoke test
+        run: |
+          out=$(./${{ matrix.exe }} "疲れたけど、楽しい一日だった。")
+          echo "$out"
+          echo "$out" | grep -E "[0-9]{5} "
+
+      - name: Package
+        run: |
+          mkdir -p out
+          if [ "${{ matrix.label }}" = "windows" ]; then
+            cp ${{ matrix.exe }} out/positive-judge-windows.exe
+          else
+            tar -czf out/positive-judge-${{ matrix.label }}.tar.gz -C dist positive-judge
+          fi
+          ls -l out
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: positive-judge-${{ matrix.label }}
+          path: out/*
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
