@@ -478,13 +478,198 @@ def judge(tokens, polarity, contrast_weight=2):
     return label, total, hits
 
 
-def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2):
+# ---------------------------------------------------------------- 皮肉の検出
+# 魚住 惟・内田 ゆず・荒木 健治「皮肉検出における感情生起要因の有効性」
+# (FIT2018 第17回情報科学技術フォーラム, E-009)の考え方を取り入れたもの。
+#
+# 皮肉は「ネガティブな出来事(感情生起要因)」のあとに、ポジティブな表現が来る対比構造を持つ。
+#   例: 「一人で文化祭まわるの確定しました。ありがとう!」
+# そこで、ネガティブな出来事のデータベースを持ち、入力がそれに似ているのに、
+# ポジティブな表現がある場合に、皮肉の可能性ありとする。
+#
+# 論文との違い(簡易化した点):
+#  - 類似度は、論文の WMD(単語の分散表現による距離)ではなく、単語の重なりの割合で求める
+#  - 出来事の抽出は、係り受け解析(CaboCha)ではなく、語の並びで近似する
+#  - SVM による学習はしない。しきい値で判定する(しきい値は仮の値で、実データでの調整が必要)
+
+# 論文の10種類の接続表現(出来事 + 接続表現 + 感情表現 の形で、出来事を集める)
+CONNECTIVE_SINGLE = {"から", "ので", "ため", "て"}
+CONNECTIVE_PAIRS = {("の", "が"), ("の", "は"), ("こと", "が"), ("こと", "は"), ("こと", "を"), ("こと", "に")}
+
+# 類似度を求めるとき、取り除く語。否定の「ない」は残す(論文と同じ)
+EVENT_STOP = set(
+    "は が の を に へ と で も や か よ ね な ぞ ぜ て た だ だっ です でし ます まし たい れる られる せる させる "
+    "する し いる い ある あり なる なっ できる こと もの ため ので から けど けれど のに ば ず".split()
+)
+NEGATION_FORMS = {"ない", "無い", "ぬ", "ん", "ず", "なかっ", "なく", "ません"}
+
+# 皮肉であることを自分で示している表現
+SARCASM_MARKERS = {"皮肉", "棒読み"}
+
+# ネガティブな出来事の例(初期データ。自然な文で書いておき、使っている形態素解析器で分ける)。
+# あくまで見本なので、実際には --learn-events で、自分のデータから集めたものを使うこと
+SEED_EVENT_PHRASES = [
+    "一人で文化祭をまわることが確定した",
+    "待ち時間が長い",
+    "満員電車に乗る",
+    "残業が続く",
+    "締め切りが迫る",
+    "寝坊して遅刻する",
+    "傘を忘れて雨に降られる",
+    "財布を落とす",
+    "テストで赤点を取る",
+    "仕事が終わらない",
+    "約束をドタキャンされる",
+    "エスカレーターが止まっている",
+]
+
+
+def event_tokens(tokens):
+    """類似度を求めるための語のリスト(基本形。助詞・助動詞・記号を除き、否定は「ない」にそろえる)"""
+    out = []
+    for surface, base, pos in tokens:
+        if not surface or char_type(surface[0]) in ("punct", "space"):
+            continue
+        word = base if base and base != "*" else surface
+        if word in NEGATION_FORMS or surface in NEGATION_FORMS:
+            out.append("ない")
+            continue
+        if pos in ("助詞", "助動詞", "記号") or word in EVENT_STOP:
+            continue
+        out.append(word)
+    return out
+
+
+def find_connectives(tokens):
+    """接続表現の位置を [(開始, 終了)] で返す(終了は含まない)"""
+    spans, i, n = [], 0, len(tokens)
+    while i < n:
+        s = tokens[i][0]
+        if i + 1 < n and (s, tokens[i + 1][0]) in CONNECTIVE_PAIRS:
+            spans.append((i, i + 2))
+            i += 2
+            continue
+        if s in CONNECTIVE_SINGLE:
+            spans.append((i, i + 1))
+        i += 1
+    return spans
+
+
+def extract_events(tokens, polarity, max_words=6):
+    """「出来事 + 接続表現 + ネガティブな感情表現」の形から、ネガティブな出来事を取り出す。
+    感情表現が否定されている場合は、ネガティブではないとみなして除く(論文と同じ)。
+    戻り値: 出来事の語のリストのリスト"""
+    found = []
+    for start, end in find_connectives(tokens):
+        after = tokens[end:]
+        for k, t in enumerate(after):  # 同じ文の終わりまで
+            if t[0] and t[0][0] in "。!?!?":
+                after = after[:k]
+                break
+        has_neg_emotion = False
+        for k, (surface, base, _pos) in enumerate(after):
+            pol = polarity.get(base) or polarity.get(surface)
+            if pol == -1 and count_negations(after, k) % 2 == 0:
+                has_neg_emotion = True
+                break
+        if not has_neg_emotion:
+            continue
+        before, j = [], start - 1  # 接続表現の前を、直前の区切りまでさかのぼる
+        while j >= 0:
+            s = tokens[j][0]
+            if s and char_type(s[0]) == "punct":
+                break
+            before.insert(0, tokens[j])
+            j -= 1
+        words = event_tokens(before)[-max_words:]
+        if len(set(words)) >= 2:
+            found.append(words)
+    return found
+
+
+def build_events(tokenize, use_seed=True, files=()):
+    """出来事のデータベースを作る。戻り値: [(表示用の文字列, 語の集合)]
+    ファイルは1行1件。空白で区切ってあれば基本形の並びとして、なければ文として読む"""
+    events, seen = [], set()
+
+    def add(words):
+        key = frozenset(w for w in words if w)
+        if len(key) >= 2 and key not in seen:
+            seen.add(key)
+            events.append((" ".join(words), key))
+
+    if use_seed:
+        for phrase in SEED_EVENT_PHRASES:
+            add(event_tokens(tokenize(phrase)))
+    for path in files:
+        with open(path, encoding="utf-8-sig") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                add(line.split() if " " in line else event_tokens(tokenize(line)))
+    return events
+
+
+def learn_events(path, tokenize, polarity):
+    """文章のファイル(1行1文)から、ネガティブな出来事を集める。戻り値: 1件ごとの文字列のリスト"""
+    seen, out = set(), []
+    with open(path, encoding="utf-8-sig") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            for words in extract_events(tokenize(line), polarity):
+                key = " ".join(words)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+    return out
+
+
+def event_similarity(tokens, events):
+    """入力が、どのネガティブな出来事に、どれだけ似ているか。
+    出来事の語のうち、入力に含まれる割合(2語以上が重なったものだけ)。戻り値: (最大の割合, その出来事)"""
+    words = set(event_tokens(tokens))
+    best, best_text = 0.0, ""
+    for text, ev in events:
+        common = len(words & ev)
+        if common < 2:
+            continue
+        score = common / len(ev)
+        if score > best:
+            best, best_text = score, text
+    return best, best_text
+
+
+def check_sarcasm(tokens, hits, events, threshold=0.7):
+    """皮肉の可能性があるか。ポジティブな表現があり、かつ、皮肉の目印か、ネガティブな出来事との類似がある場合。
+    戻り値: (可能性あり?, 理由のリスト)"""
+    if not any(h[2] > 0 for h in hits):
+        return False, []
+    reasons = []
+    marks = ({t[0] for t in tokens} | {t[1] for t in tokens}) & SARCASM_MARKERS
+    if marks:
+        reasons.append(f"「{sorted(marks)[0]}」という表現がある")
+    best, text = event_similarity(tokens, events)
+    if best >= threshold:
+        reasons.append(f"ネガティブな出来事「{text}」に似ている(類似度 {best:.2f})")
+    return bool(reasons), reasons
+
+
+def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2, sarcasm=None):
     tokens = tokenize(text)
     label, total, hits = judge(tokens, polarity, contrast_weight)
+    surface_label, reasons = label, []
+    if sarcasm and sarcasm["mode"] != "off" and total >= 0:
+        suspected, reasons = check_sarcasm(tokens, hits, sarcasm["events"], sarcasm["threshold"])
+        if suspected:
+            label = "ネガティブ(皮肉の可能性)" if sarcasm["mode"] == "negative" else "皮肉の可能性あり"
     print(f"入力: {text}")
     pos_n = sum(1 for h in hits if h[2] > 0)
     neg_n = sum(1 for h in hits if h[2] < 0)
-    print(f"結果: {label}  (スコア {total:+d} / ポジ語 {pos_n}・ネガ語 {neg_n})")
+    extra = f"表面の判定: {surface_label} / " if label != surface_label else ""
+    print(f"結果: {label}  ({extra}スコア {total:+d} / ポジ語 {pos_n}・ネガ語 {neg_n})")
     for surface, base, value, negs, weight in hits:
         mark = "+" if value > 0 else "-"
         note = "" if negs == 0 else (" ※否定で反転" if negs % 2 else " ※二重否定(元の極性)")
@@ -492,6 +677,8 @@ def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2):
             note += f" ※逆接の後ろ ×{weight}"
         shown = surface if surface == base else f"{surface} → {base}"
         print(f"  {mark} {shown}{note}")
+    for reason in reasons:
+        print(f"  ※ 皮肉の根拠: {reason}")
     if verbose:
         print("  [形態素]")
         for surface, base, pos in tokens:
@@ -499,7 +686,7 @@ def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2):
     print()
 
 
-def run_interactive(name, tokenize, polarity, verbose, contrast_weight):
+def run_interactive(name, tokenize, polarity, verbose, contrast_weight, sarcasm=None):
     """文を入力して判定を繰り返す(何も入力せず Enter で終了)。ダブルクリック起動用"""
     print("判定したい文を入力して Enter を押してください。(何も入力せず Enter で終了)")
     print()
@@ -512,7 +699,7 @@ def run_interactive(name, tokenize, polarity, verbose, contrast_weight):
         if not text:
             break
         print()
-        report(text, name, tokenize, polarity, verbose, contrast_weight)
+        report(text, name, tokenize, polarity, verbose, contrast_weight, sarcasm)
     if getattr(sys, "frozen", False):  # exe をダブルクリックしたとき、窓がすぐ閉じないように
         try:
             input("Enter キーで閉じます")
@@ -534,6 +721,18 @@ def main():
                     help="既定の辞書(日本語評価極性辞書)を自動取得せず、内蔵辞書だけを使う")
     ap.add_argument("--contrast-weight", type=int, default=2,
                     help="逆接(けど・のに・が)の後ろの感情語の重み(既定 2、1で無効)")
+    ap.add_argument("--sarcasm", choices=["flag", "negative", "off"], default="flag",
+                    help="皮肉の扱い。flag=「皮肉の可能性あり」と表示(既定) / negative=ネガティブとして扱う / off=検出しない")
+    ap.add_argument("--events", action="append", default=[],
+                    help="ネガティブな出来事のファイル(1行1件。複数指定可)。--learn-events で作れる")
+    ap.add_argument("--no-seed-events", action="store_true",
+                    help="内蔵の出来事の見本を使わない")
+    ap.add_argument("--event-threshold", type=float, default=0.7,
+                    help="皮肉と疑う、出来事との類似度のしきい値(既定 0.7。仮の値なので、実データで調整すること)")
+    ap.add_argument("--learn-events", metavar="文章ファイル",
+                    help="文章のファイル(1行1文)から、ネガティブな出来事を集めて保存して終了する")
+    ap.add_argument("--events-out", default="events_learned.txt",
+                    help="--learn-events の保存先(既定 events_learned.txt)")
     ap.add_argument("--ignore", action="append", default=[],
                     help="判定から外す語(複数指定可。例: --ignore サービス)")
     ap.add_argument("--min-score", type=float, default=0.5,
@@ -550,7 +749,7 @@ def main():
     if not texts and not sys.stdin.isatty():
         texts = [l.strip() for l in sys.stdin if l.strip()]
     interactive = False
-    if not texts:
+    if not texts and not args.learn_events:
         if sys.stdin.isatty():
             interactive = True  # 引数なしで端末から起動 → 入力待ちの対話モード
         else:
@@ -595,12 +794,25 @@ def main():
     print(f"バックエンド: {name}")
     if name.startswith("builtin"):
         print("※ 形態素解析器が未インストールのため簡易トークナイザーで動作中です。")
+
+    if args.learn_events:  # 文章のファイルから、ネガティブな出来事を集めて保存する
+        learned = learn_events(args.learn_events, tokenize, polarity)
+        with open(args.events_out, "w", encoding="utf-8") as fh:
+            fh.write("# ネガティブな出来事(基本形の並び)。--events で読み込める\n")
+            fh.write("\n".join(learned) + ("\n" if learned else ""))
+        print(f"ネガティブな出来事を {len(learned)} 件集めて、{args.events_out} に保存しました")
+        return
+
+    sarcasm = {"mode": args.sarcasm, "events": [], "threshold": args.event_threshold}
+    if args.sarcasm != "off":
+        sarcasm["events"] = build_events(tokenize, not args.no_seed_events, args.events)
+        print(f"皮肉の検出: {args.sarcasm}(ネガティブな出来事 {len(sarcasm['events'])} 件)")
     print()
     if interactive:
-        run_interactive(name, tokenize, polarity, args.verbose, args.contrast_weight)
+        run_interactive(name, tokenize, polarity, args.verbose, args.contrast_weight, sarcasm)
         return
     for t in texts:
-        report(t, name, tokenize, polarity, args.verbose, args.contrast_weight)
+        report(t, name, tokenize, polarity, args.verbose, args.contrast_weight, sarcasm)
 
 
 if __name__ == "__main__":
