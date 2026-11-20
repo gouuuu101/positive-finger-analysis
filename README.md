@@ -41,7 +41,7 @@ tar -xzf positive-judge-macos.tar.gz     # Linux は positive-judge-linux.tar.gz
 ## インストール(1行)
 
 ```
-pip install "git+https://github.com/<ユーザー名>/<リポジトリ名>#subdirectory=positive-judge"
+pip install git+https://github.com/<ユーザー名>/<リポジトリ名>
 ```
 
 これだけで、形態素解析器(janome)も一緒に入ります。別途インストールするものはありません。
@@ -61,7 +61,7 @@ python -m positive_judge "今日はとても楽しかった!"
 
 ```
 git clone https://github.com/<ユーザー名>/<リポジトリ名>
-cd <リポジトリ名>/positive-judge
+cd <リポジトリ名>
 pip install -e .
 ```
 
@@ -114,7 +114,7 @@ Windows・Mac・Linux 用のファイルは、GitHub Actions(`.github/workflows/
 
 ### pip でも辞書を同梱したいとき(任意)
 
-`pip install "git+https://github.com/<ユーザー名>/<リポジトリ名>#subdirectory=positive-judge"` で入れた場合、辞書は初回の実行時に自動で取得します。
+`pip install git+https://github.com/<ユーザー名>/<リポジトリ名>` で入れた場合、辞書は初回の実行時に自動で取得します。
 辞書も一緒に入れたい場合は、次の2ファイルを `positive_judge_data/` フォルダに置いてから、コミットしてください。
 
 - https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/wago.121808.pn
