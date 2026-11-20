@@ -18,19 +18,22 @@ jobs:
           - os: windows-latest
             label: windows
             exe: dist/positive-judge.exe
+            sep: ";"
           - os: macos-latest
             label: macos
             exe: dist/positive-judge
+            sep: ":"
           - os: ubuntu-latest
             label: linux
             exe: dist/positive-judge
+            sep: ":"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
-        working-directory: positive-judge
     env:
       PYTHONUTF8: "1"
+      MSYS_NO_PATHCONV: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -55,13 +58,21 @@ jobs:
           ls -l positive_judge_data
 
       - name: Build executable
-        run: pyinstaller --onefile --name positive-judge --collect-all janome --collect-all positive_judge_data positive_judge.py
+        run: >
+          pyinstaller --onefile --name positive-judge --collect-all janome
+          --add-data "positive_judge_data/wago.121808.pn${{ matrix.sep }}positive_judge_data"
+          --add-data "positive_judge_data/pn.csv.m3.120408.trim${{ matrix.sep }}positive_judge_data"
+          positive_judge.py
 
       - name: Smoke test
         run: |
-          out=$(./${{ matrix.exe }} "疲れたけど、楽しい一日だった。")
+          out=$(./${{ matrix.exe }} "疲れたけど、楽しい一日だった。" 2>&1)
           echo "$out"
           echo "$out" | grep -E "[0-9]{5} "
+          if echo "$out" | grep -q "wago.121808.pn"; then
+            echo "ERROR: bundled dictionary was not found (it tried to download instead)"
+            exit 1
+          fi
 
       - name: Package
         run: |
@@ -77,10 +88,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: positive-judge-${{ matrix.label }}
-          path: positive-judge/out/*
+          path: out/*
 
       - name: Attach to Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: positive-judge/out/*
+          files: out/*
