@@ -3,10 +3,10 @@ __pycache__/
 .venv/
 venv/
 
-# 辞書本体は含めない(配布元の利用条件に従い、実行時に取得する)
-wago.121808.pn
-pn.csv.m3.120408.trim
-.cache/
 build/
 dist/
 *.egg-info/
+
+# 実行時に自動取得した辞書の保存先(~/.cache/positive_judge)はリポジトリの外にあるので、
+# 同梱用の辞書(positive_judge_data/ の中)は無視しない
+.cache/

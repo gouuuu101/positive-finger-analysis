@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+build/
+dist/
+*.egg-info/
+
+# 実行時に自動取得した辞書の保存先(~/.cache/positive_judge)はリポジトリの外にあるので、
+# 同梱用の辞書(positive_judge_data/ の中)は無視しない
+.cache/

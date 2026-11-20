@@ -138,6 +138,20 @@ DEFAULT_DICT_URLS = [
     "https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/wago.121808.pn",
     "https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/pn.csv.m3.120408.trim",
 ]
+# パッケージに同梱する辞書のファイル名(positive_judge_data/ に置く)
+BUNDLED_FILES = ["wago.121808.pn", "pn.csv.m3.120408.trim"]
+DICT_CREDIT = "日本語評価極性辞書(東北大学 乾・岡崎研究室)"
+
+
+def bundled_dict_paths():
+    """同梱されている辞書ファイルのパス(pip インストール後・exe・ソースのどれでも探す)"""
+    try:
+        import positive_judge_data
+    except ImportError:
+        return []
+    base = os.path.dirname(os.path.abspath(positive_judge_data.__file__))
+    paths = [os.path.join(base, name) for name in BUNDLED_FILES]
+    return [p for p in paths if os.path.exists(p)]
 
 
 def _sign(raw, min_score):
@@ -240,6 +254,7 @@ def fetch_dict(url, refresh=False):
     base = os.path.basename(urllib.parse.urlparse(url).path) or "dict"
     cached = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest()[:12] + "_" + base)
     if refresh or not os.path.exists(cached):
+        print(f"辞書をダウンロードしています(初回のみ): {base}", file=sys.stderr)
         req = urllib.request.Request(url, headers={"User-Agent": "positive_judge/1.0"})
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
@@ -462,6 +477,27 @@ def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2):
     print()
 
 
+def run_interactive(name, tokenize, polarity, verbose, contrast_weight):
+    """文を入力して判定を繰り返す(何も入力せず Enter で終了)。ダブルクリック起動用"""
+    print("判定したい文を入力して Enter を押してください。(何も入力せず Enter で終了)")
+    print()
+    while True:
+        try:
+            text = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not text:
+            break
+        print()
+        report(text, name, tokenize, polarity, verbose, contrast_weight)
+    if getattr(sys, "frozen", False):  # exe をダブルクリックしたとき、窓がすぐ閉じないように
+        try:
+            input("Enter キーで閉じます")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(description="形態素解析によるポジティブ判定")
     ap.add_argument("texts", nargs="*", help="判定する文")
@@ -490,14 +526,26 @@ def main():
             texts += [l.strip() for l in fh if l.strip()]
     if not texts and not sys.stdin.isatty():
         texts = [l.strip() for l in sys.stdin if l.strip()]
+    interactive = False
     if not texts:
-        ap.print_help()
-        return
+        if sys.stdin.isatty():
+            interactive = True  # 引数なしで端末から起動 → 入力待ちの対話モード
+        else:
+            ap.print_help()
+            return
 
-    # 辞書: 指定が無ければ既定の辞書を自動取得(初回のみ通信。以後は保存したものを使う)
+    # 辞書: 指定が無ければ、同梱の辞書を使う。同梱が無ければ既定の辞書を自動取得する
+    #       (初回のみ通信。以後は保存したものを使う)
     extra = {}
     use_default = not (args.dict or args.dict_url or args.no_default_dict)
-    urls = list(DEFAULT_DICT_URLS) if use_default else list(args.dict_url)
+    urls = list(args.dict_url)
+    if use_default:
+        bundled = bundled_dict_paths()
+        if len(bundled) == len(BUNDLED_FILES):
+            for path in bundled:
+                extra.update(load_dict_file(path, args.min_score))
+        else:
+            urls = list(DEFAULT_DICT_URLS)
     for url in urls:
         try:
             extra.update(load_dict_file(fetch_dict(url, args.refresh), args.min_score))
@@ -511,7 +559,8 @@ def main():
     for path in args.dict:
         extra.update(load_dict_file(path, args.min_score))
     if extra:
-        print(f"外部辞書: {len(extra)} 語を読み込みました")
+        credit = f"  辞書: {DICT_CREDIT}" if use_default else ""
+        print(f"外部辞書: {len(extra)} 語を読み込みました{credit}")
     polarity, surf = build_lexicon(extra)
     for word in args.ignore:
         polarity.pop(word, None)
@@ -521,6 +570,9 @@ def main():
     if name.startswith("builtin"):
         print("※ 形態素解析器が未インストールのため簡易トークナイザーで動作中です。")
     print()
+    if interactive:
+        run_interactive(name, tokenize, polarity, args.verbose, args.contrast_weight)
+        return
     for t in texts:
         report(t, name, tokenize, polarity, args.verbose, args.contrast_weight)
 

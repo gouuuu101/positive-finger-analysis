@@ -10,6 +10,34 @@
 4. 逆接(「けど」「のに」「が」)の後ろの語は2倍の重みで数える
 5. 合計スコアで ポジティブ / ネガティブ / 混在 / 判定不能 を出す
 
+## ダウンロードして使う(インストール不要・Windows / Mac / Linux)
+
+このリポジトリの「Releases」から、使っているOSのファイルをダウンロードします。
+形態素解析器も感情辞書も、ファイルの中に入っているので、**何もインストールせず、インターネットにつながなくても動きます**。
+
+| OS | ファイル | 使い方 |
+|---|---|---|
+| Windows | `positive-judge-windows.exe` | ダブルクリックで起動 |
+| Mac(Apple シリコン) | `positive-judge-macos.tar.gz` | 展開して、ターミナルから実行 |
+| Linux | `positive-judge-linux.tar.gz` | 展開して、ターミナルから実行 |
+
+起動したら、判定したい文を入力して Enter を押します。(何も入力せず Enter で終了)
+
+**Windows**
+- 「Windows によって PC が保護されました」と表示されたら、「詳細情報」→「実行」を選びます。署名のない exe では表示されることがあります。
+- コマンドからも使えます: `.\positive-judge-windows.exe "今日はとても楽しかった!"`
+
+**Mac / Linux**
+```
+tar -xzf positive-judge-macos.tar.gz     # Linux は positive-judge-linux.tar.gz
+./positive-judge "今日はとても楽しかった!"
+```
+- Mac で「開発元を検証できません」と表示されたら、一度だけ次を実行してから、もう一度起動します。
+  ```
+  xattr -d com.apple.quarantine ./positive-judge
+  ```
+- Intel の Mac 用のファイルは用意していません。Intel の Mac では、下の「インストール(1行)」を使ってください。
+
 ## インストール(1行)
 
 ```
@@ -75,6 +103,25 @@ positive-judge --no-default-dict "..."                      # 内蔵の辞書だ
 | `--backend` | `auto` / `fugashi` / `janome` / `sudachi` / `builtin` |
 | `-v` | 形態素の一覧も表示 |
 
+## 実行ファイルの作り方(管理者向け)
+
+Windows・Mac・Linux 用のファイルは、GitHub Actions(`.github/workflows/release.yml`)が自動で作ります。
+ビルドの途中で、感情辞書を配布元から取得してファイルの中に入れます。
+
+- リリースを作る: 「Releases」→「Draft a new release」→ タグ(例: `v0.1.0`)を新規作成 →「Publish release」。
+  しばらくすると、そのリリースに3つのOS用のファイルが添付されます。
+- 試しにビルドだけする: 「Actions」→「Build executables」→「Run workflow」。完成したファイルは、実行結果のページの「Artifacts」からダウンロードできます。
+
+### pip でも辞書を同梱したいとき(任意)
+
+`pip install git+https://github.com/<ユーザー名>/positive-judge` で入れた場合、辞書は初回の実行時に自動で取得します。
+辞書も一緒に入れたい場合は、次の2ファイルを `positive_judge_data/` フォルダに置いてから、コミットしてください。
+
+- https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/wago.121808.pn
+- https://www.cl.ecei.tohoku.ac.jp/resources/sent_lex/pn.csv.m3.120408.trim
+
+2つとも置かれていれば、インターネットに接続せずに使えます。
+
 ## 限界
 
 - 単語単位の判定です。皮肉や、文脈が必要な文は正しく判定できないことがあります。
@@ -85,12 +132,12 @@ positive-judge --no-default-dict "..."                      # 内蔵の辞書だ
 
 ## 辞書の出典と利用条件
 
-日本語評価極性辞書(東北大学 乾・岡崎研究室)を利用します。
+日本語評価極性辞書(東北大学 乾・岡崎研究室)を利用します。実行ファイルには、この辞書が入っています。
 
 - 用言編: 小林ら (2005)
 - 名詞編: 東山ら (2008)
 
 配布元の公式ページに、出典として挙げる論文の詳細と利用条件の記載があります。
-公式ページでは出典を明記すれば商用利用も可能とされていますが、ページには「All rights reserved」の表記もあります。公開や商用で使う前に、配布元で最新の条件を確認してください。
+公式ページでは出典を明記すれば商用利用も可能とされています。出典は、このリポジトリの `positive_judge_data/NOTICE.txt` と、ツールの起動時の表示に入れています。最新の条件は、配布元で確認してください。
 
 配布元: https://www.cl.ecei.tohoku.ac.jp/Open_Resources-Japanese_Sentiment_Polarity_Dictionary.html

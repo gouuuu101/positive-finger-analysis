@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "形態素解析と日本語評価極性辞書による、日本語のポジティブ/ネガティブ判定"
 readme = "README.md"
 requires-python = ">=3.9"
-# janome は純Pythonの形態素解析器(辞書同梱)。pip install 時に自動で入る
+# janome は純Pythonの形態素解析器(辞書同梱)。pip install 時に自動で入る。
+# Windows・Mac・Linux のどれでも、ビルドの手間なしで入る
 dependencies = ["janome"]
 
 [project.scripts]
@@ -16,3 +17,7 @@ positive-judge = "positive_judge:main"
 
 [tool.setuptools]
 py-modules = ["positive_judge"]
+packages = ["positive_judge_data"]
+
+[tool.setuptools.package-data]
+positive_judge_data = ["wago.121808.pn", "pn.csv.m3.120408.trim", "NOTICE.txt"]
