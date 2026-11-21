@@ -20,6 +20,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import json
 import os
 import sys
 import tarfile
@@ -587,9 +588,10 @@ def extract_events(tokens, polarity, max_words=6):
     return found
 
 
-def build_events(tokenize, use_seed=True, files=()):
+def build_events(tokenize, use_seed=True, files=(), lines=()):
     """出来事のデータベースを作る。戻り値: [(表示用の文字列, 語の集合)]
-    ファイルは1行1件。空白で区切ってあれば基本形の並びとして、なければ文として読む"""
+    ファイルは1行1件。空白で区切ってあれば基本形の並びとして、なければ文として読む。
+    lines は、ファイルを経由せずに、同じ形式の文字列で直接渡す場合に使う"""
     events, seen = [], set()
 
     def add(words):
@@ -601,30 +603,39 @@ def build_events(tokenize, use_seed=True, files=()):
     if use_seed:
         for phrase in SEED_EVENT_PHRASES:
             add(event_tokens(tokenize(phrase)))
+    def add_line(line):
+        line = line.strip()
+        if line and not line.startswith("#"):
+            add(line.split() if " " in line else event_tokens(tokenize(line)))
+
     for path in files:
         with open(path, encoding="utf-8-sig") as fh:
             for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                add(line.split() if " " in line else event_tokens(tokenize(line)))
+                add_line(line)
+    for line in lines:
+        add_line(line)
     return events
+
+
+def learn_events_from_lines(lines, tokenize, polarity):
+    """文章(1行1文)のリストから、ネガティブな出来事を集める。戻り値: 1件ごとの文字列のリスト"""
+    seen, out = set(), []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        for words in extract_events(tokenize(line), polarity):
+            key = " ".join(words)
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
 
 
 def learn_events(path, tokenize, polarity):
     """文章のファイル(1行1文)から、ネガティブな出来事を集める。戻り値: 1件ごとの文字列のリスト"""
-    seen, out = set(), []
     with open(path, encoding="utf-8-sig") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            for words in extract_events(tokenize(line), polarity):
-                key = " ".join(words)
-                if key not in seen:
-                    seen.add(key)
-                    out.append(key)
-    return out
+        return learn_events_from_lines(fh, tokenize, polarity)
 
 
 def event_similarity(tokens, events):
@@ -642,8 +653,9 @@ def event_similarity(tokens, events):
     return best, best_text
 
 
-def check_sarcasm(tokens, hits, polarity, events, threshold=0.7):
-    """皮肉の可能性があるか。全体スコアではなく、表現の対立も手掛かりにする。
+def check_sarcasm(tokens, hits, events, threshold=0.7, classifier=None, text=""):
+    """皮肉の可能性があるか。ポジティブな表現があり、かつ、皮肉の目印か、ネガティブな出来事との類似がある場合。
+    classifier: 任意。文字列を受け取り 0〜1 の「皮肉らしさ」を返す関数(BERT などの学習済みモデルをつなぐ口)。0.5以上で根拠に加える。
     戻り値: (可能性あり?, 理由のリスト)"""
     if not any(h[2] > 0 for h in hits):
         return False, []
@@ -651,41 +663,51 @@ def check_sarcasm(tokens, hits, polarity, events, threshold=0.7):
     marks = ({t[0] for t in tokens} | {t[1] for t in tokens}) & SARCASM_MARKERS
     if marks:
         reasons.append(f"「{sorted(marks)[0]}」という表現がある")
-
-    # 実験ルール: 「ネガティブな語 + 逆接 + ポジティブな語」の並びを拾う。
-    # 文全体の合計スコアが正でも、後半のポジ語が強くても、この対立は消さない。
-    contrast_at = last_contrast_index(tokens)
-    if contrast_at >= 0:
-        # 否定は反映するが、逆接後の倍率や文全体の合計は使わない。
-        left_negative = False
-        right_positive = False
-        for idx, (surface, base, _pos) in enumerate(tokens):
-            raw = polarity.get(base) or polarity.get(surface)
-            if raw is None:
-                continue
-            negs = count_negations(tokens, idx)
-            effective = -raw if negs % 2 else raw
-            if idx < contrast_at and effective < 0:
-                left_negative = True
-            elif idx > contrast_at and effective > 0:
-                right_positive = True
-        if left_negative and right_positive:
-            reasons.append("逆接の前にネガティブ表現、後ろにポジティブ表現がある")
-
-    best, text = event_similarity(tokens, events)
+    # 状況の部分だけで比べる: ポジティブな評価表現(「最高」「ありがとう」など)を除いた語で、出来事との類似を見る
+    pos_bases = {h[1] for h in hits if h[2] > 0} | SARCASM_MARKERS  # 手がかり語(皮肉・棒読み)も除く
+    situation = [t for t in tokens if t[1] not in pos_bases and t[0] not in pos_bases]
+    best, ev_text = event_similarity(situation, events)
+    if best < threshold:
+        best, ev_text = event_similarity(tokens, events)
     if best >= threshold:
-        reasons.append(f"ネガティブな出来事「{text}」に似ている(類似度 {best:.2f})")
+        reasons.append(f"ネガティブな出来事「{ev_text}」に似ている(類似度 {best:.2f})")
+    if classifier is not None and text:
+        try:
+            score = float(classifier(text))
+        except Exception as exc:  # モデルの失敗で全体を止めない
+            score = 0.0
+            reasons.append(f"(分類器の呼び出しに失敗: {exc})")
+        if score >= 0.5:
+            reasons.append(f"分類器が皮肉らしいと判断(確率 {score:.2f})")
     return bool(reasons), reasons
 
 
-def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2, sarcasm=None):
+def analyze(text, tokenize, polarity, contrast_weight=2, sarcasm=None):
+    """1文を判定して、辞書で返す。他のアプリに組み込むときは、これを呼ぶ(--json も同じ内容)。
+    キー: text, label, surface_label, score, sarcasm(bool), reasons, hits[{surface, base, polarity, negations, weight}]"""
     tokens = tokenize(text)
     label, total, hits = judge(tokens, polarity, contrast_weight)
-    surface_label, reasons = label, []
-    if sarcasm and sarcasm["mode"] != "off":
-        suspected, reasons = check_sarcasm(tokens, hits, polarity, sarcasm["events"], sarcasm["threshold"])
+    surface_label, reasons, suspected = label, [], False
+    if sarcasm and sarcasm["mode"] != "off" and total >= 0:
+        suspected, reasons = check_sarcasm(tokens, hits, sarcasm["events"], sarcasm["threshold"],
+                                           sarcasm.get("classifier"), text)
         if suspected:
             label = "ネガティブ(皮肉の可能性)" if sarcasm["mode"] == "negative" else "皮肉の可能性あり"
+    return {
+        "text": text, "label": label, "surface_label": surface_label, "score": total,
+        "sarcasm": suspected, "reasons": reasons, "tokens": tokens,
+        "hits": [{"surface": h[0], "base": h[1], "polarity": h[2], "negations": h[3], "weight": h[4]} for h in hits],
+    }
+
+
+def report(text, backend_name, tokenize, polarity, verbose, contrast_weight=2, sarcasm=None, as_json=False):
+    r = analyze(text, tokenize, polarity, contrast_weight, sarcasm)
+    if as_json:
+        out = {k: v for k, v in r.items() if k != "tokens"}
+        print(json.dumps(out, ensure_ascii=False))
+        return
+    tokens, label, total, surface_label, reasons = r["tokens"], r["label"], r["score"], r["surface_label"], r["reasons"]
+    hits = [(h["surface"], h["base"], h["polarity"], h["negations"], h["weight"]) for h in r["hits"]]
     print(f"入力: {text}")
     pos_n = sum(1 for h in hits if h[2] > 0)
     neg_n = sum(1 for h in hits if h[2] < 0)
@@ -761,7 +783,13 @@ def main():
     ap.add_argument("--backend", default="auto",
                     choices=["auto", "fugashi", "janome", "sudachi", "builtin"])
     ap.add_argument("-v", "--verbose", action="store_true", help="形態素の一覧も表示")
+    ap.add_argument("--json", action="store_true",
+                    help="結果を1行1件の JSON で出力する(他のアプリから呼ぶとき用。状況メッセージは標準エラーへ)")
+    ap.add_argument("--classifier", metavar="モジュール:関数",
+                    help="皮肉らしさ(0〜1)を返す関数をつなぐ。例: mymodel:predict(BERT などの学習済みモデル用)")
     args = ap.parse_args()
+    def info(*a, **k):  # --json のときは、状況メッセージを標準エラーへ出す
+        print(*a, file=sys.stderr if args.json else sys.stdout, **k)
 
     texts = list(args.texts)
     if args.file:
@@ -806,34 +834,38 @@ def main():
         extra.update(load_dict_file(path, args.min_score))
     if extra:
         credit = f"  辞書: {DICT_CREDIT}" if use_default else ""
-        print(f"外部辞書: {len(extra)} 語を読み込みました{source}{credit}")
+        info(f"外部辞書: {len(extra)} 語を読み込みました{source}{credit}")
     polarity, surf = build_lexicon(extra)
     for word in args.ignore:
         polarity.pop(word, None)
     name, tokenize = make_backend(args.backend, surf)
 
-    print(f"バックエンド: {name}")
+    info(f"バックエンド: {name}")
     if name.startswith("builtin"):
-        print("※ 形態素解析器が未インストールのため簡易トークナイザーで動作中です。")
+        info("※ 形態素解析器が未インストールのため簡易トークナイザーで動作中です。")
 
     if args.learn_events:  # 文章のファイルから、ネガティブな出来事を集めて保存する
         learned = learn_events(args.learn_events, tokenize, polarity)
         with open(args.events_out, "w", encoding="utf-8") as fh:
             fh.write("# ネガティブな出来事(基本形の並び)。--events で読み込める\n")
             fh.write("\n".join(learned) + ("\n" if learned else ""))
-        print(f"ネガティブな出来事を {len(learned)} 件集めて、{args.events_out} に保存しました")
+        info(f"ネガティブな出来事を {len(learned)} 件集めて、{args.events_out} に保存しました")
         return
 
-    sarcasm = {"mode": args.sarcasm, "events": [], "threshold": args.event_threshold}
+    sarcasm = {"mode": args.sarcasm, "events": [], "threshold": args.event_threshold, "classifier": None}
+    if args.classifier:
+        import importlib
+        mod_name, _, func_name = args.classifier.partition(":")
+        sarcasm["classifier"] = getattr(importlib.import_module(mod_name), func_name or "predict")
     if args.sarcasm != "off":
         sarcasm["events"] = build_events(tokenize, not args.no_seed_events, args.events)
-        print(f"皮肉の検出: {args.sarcasm}(ネガティブな出来事 {len(sarcasm['events'])} 件)")
-    print()
+        info(f"皮肉の検出: {args.sarcasm}(ネガティブな出来事 {len(sarcasm['events'])} 件)")
+    info()
     if interactive:
         run_interactive(name, tokenize, polarity, args.verbose, args.contrast_weight, sarcasm)
         return
     for t in texts:
-        report(t, name, tokenize, polarity, args.verbose, args.contrast_weight, sarcasm)
+        report(t, name, tokenize, polarity, args.verbose, args.contrast_weight, sarcasm, as_json=args.json)
 
 
 if __name__ == "__main__":
