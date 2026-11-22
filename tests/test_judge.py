@@ -225,3 +225,58 @@ class EventPathGuardTests(unittest.TestCase):
     def test_net_zero_score_blocks_event_path(self):
         toks = T("大事|大事|名詞", "な|な|助動詞", "待ち時間|待ち時間|名詞", "長い|長い|形容詞", "疲れる|疲れる|動詞", "絶望|絶望|名詞")
         self.assertFalse(self.run_check(toks)[0])
+
+
+class SlangTests(unittest.TestCase):
+    """辞書にない言葉(俗語・口語)の辞書と、細かく割れた語のまとめ"""
+
+    def setUp(self):
+        self.pol, _ = pj.build_lexicon()
+        self.forms = pj.DEFAULT_SLANG_FORMS
+
+    def run_tokens(self, toks):
+        t = pj.wrap_tokenizer(lambda _x: toks, self.forms)("x")
+        return t, pj.judge(t, self.pol)
+
+    def test_split_adjective_is_merged(self):
+        t, (label, total, _h) = self.run_tokens(T("き|き|名詞", "も|も|名詞", "かっ|かる|動詞", "た|た|助動詞"))
+        self.assertEqual(t[0][1], "きもい")
+        self.assertEqual(total, -1)
+
+    def test_katakana_and_mixed_script(self):
+        _t, (_l, total, _h) = self.run_tokens(T("ムカつい|ムカつく|動詞", "た|た|助動詞"))
+        self.assertEqual(total, -1)
+        _t, (_l, total, _h) = self.run_tokens(T("エモい|エモい|形容詞"))
+        self.assertEqual(total, 1)
+
+    def test_negation_flips_slang(self):
+        _t, (_l, total, _h) = self.run_tokens(T("キモく|キモい|形容詞", "ない|ない|助動詞"))
+        self.assertEqual(total, 1)
+
+    def test_multi_token_word(self):
+        t, (_l, total, _h) = self.run_tokens(T("気持ち|気持ち|名詞", "悪い|悪い|形容詞"))
+        self.assertEqual(len(t), 1)
+        self.assertEqual(total, -1)
+
+    def test_unrelated_tokens_unchanged(self):
+        toks = T("今日|今日|名詞", "は|は|助詞", "雨|雨|名詞")
+        self.assertEqual(pj.wrap_tokenizer(lambda _x: toks, self.forms)("x"), toks)
+
+    def test_user_words(self):
+        pol, forms = pj.build_slang([("バグる", -1, "godan"), ("エグい", -1, "adj")])
+        t = pj.wrap_tokenizer(lambda _x: T("バグっ|バグる|動詞", "て|て|助詞"), forms)("x")
+        self.assertEqual(t[0][1], "バグる")
+        self.assertEqual(pol["バグる"], -1)
+
+    def test_suggest_words(self):
+        pol, _ = pj.build_lexicon()
+        lines = ["ネトゲ廃人だ", "ネトゲ廃人は最高", "今日は楽しい"]
+        toks = {"ネトゲ廃人だ": T("ネトゲ廃人|ネトゲ廃人|名詞", "だ|だ|助動詞"),
+                "ネトゲ廃人は最高": T("ネトゲ廃人|ネトゲ廃人|名詞", "は|は|助詞", "最高|最高|名詞"),
+                "今日は楽しい": T("今日|今日|名詞", "は|は|助詞", "楽しい|楽しい|形容詞")}
+        rows = pj.suggest_words(lines, lambda x: toks[x], pol, min_count=2)
+        words = [r[0] for r in rows]
+        self.assertIn("ネトゲ廃人", words)
+        self.assertNotIn("最高", words)
+        row = next(r for r in rows if r[0] == "ネトゲ廃人")
+        self.assertEqual(row[1], 2)
