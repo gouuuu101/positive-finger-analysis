@@ -739,11 +739,18 @@ def check_sarcasm(tokens, hits, events, threshold=0.7, classifier=None, text="",
     # 状況の部分だけで比べる: ポジティブな評価表現(「最高」「ありがとう」など)を除いた語で、出来事との類似を見る
     pos_bases = {h[1] for h in hits if h[2] > 0} | SARCASM_MARKERS  # 手がかり語(皮肉・棒読み)も除く
     situation = [t for t in tokens if t[1] not in pos_bases and t[0] not in pos_bases]
-    best, ev_text = event_similarity(situation, events)
-    if best < threshold:
-        best, ev_text = event_similarity(tokens, events)
-    if best >= threshold:
-        reasons.append(f"ネガティブな出来事「{ev_text}」に似ている(類似度 {best:.2f})")
+    # 出来事との類似による疑いは、(1) 最後の感情語がポジティブのとき、(2) 逆接(けど・が・でも)でつながっていないときだけ使う。
+    #  (1) 文の最後の感情語がポジティブのときだけ。「大事なデータが消えて絶望した」のように、最後がネガティブな文を除くため
+    #      (皮肉では、評価の表現が後ろに来ることが多い)
+    #  (2) 「待ち時間は長かったけど、おいしかった」のような、本物の肯定を除くため
+    ends_positive = bool(hits) and hits[-1][2] > 0
+    has_concessive = any(lk == "concessive" for _s, _e, lk in split_clauses(tokens))
+    if ends_positive and not has_concessive:
+        best, ev_text = event_similarity(situation, events)
+        if best < threshold:
+            best, ev_text = event_similarity(tokens, events)
+        if best >= threshold:
+            reasons.append(f"ネガティブな出来事「{ev_text}」に似ている(類似度 {best:.2f})")
     if contrast and polarity is not None:
         found = contrast_sarcasm(tokens, polarity, events, clause_threshold)
         if found:
