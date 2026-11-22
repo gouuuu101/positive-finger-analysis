@@ -142,6 +142,27 @@ def main():
         fp = sum(1 for r in n if predict(r, 0.7)["sarcasm"])
         print(f"  {cat}: 皮肉 {hit}/{len(s)} を検出 / 皮肉でない {fp}/{len(n)} を誤検出")
 
+    # 4) 俗語・口語の辞書(data/slang_check.csv): 辞書にない言葉を判定できるか
+    slang_path = os.path.join(os.path.dirname(args.data), "slang_check.csv")
+    if os.path.exists(slang_path):
+        srows = load_rows(slang_path)
+        print(f"\n俗語・口語の判定({len(srows)} 文。ポジティブ / ネガティブの正解率):")
+        for title, use in (("俗語の辞書なし", False), ("俗語の辞書あり", True)):
+            pol2, surf2 = pj.build_lexicon(extra, slang=use)
+            _n, tok2 = pj.make_backend(args.backend, surf2, None if use else {})
+            ok = 0
+            wrong = []
+            for r in srows:
+                lab = pj.judge(tok2(r["text"]), pol2, 2)[0]
+                if lab.startswith(r["label"]):
+                    ok += 1
+                else:
+                    wrong.append((r["text"], r["label"], lab))
+            print(f"  {title}: {ok}/{len(srows)} ({ok / len(srows):.0%})")
+            if use and args.errors:
+                for t_, g_, l_ in wrong:
+                    print(f"    間違い: {t_}  正解={g_} 判定={l_}")
+
     if args.errors:
         print("\n間違い(しきい値 0.7):")
         for r in rows:

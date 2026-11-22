@@ -87,7 +87,162 @@ def adj_i_forms(base):
     return {base, stem + "く", stem + "かっ", stem + "くて", stem + "ければ", stem + "さ", stem + "そう"}
 
 
-def build_lexicon(extra=None):
+# ---------------------------------------------------------------- 俗語・口語の辞書(東北大学の辞書にない言葉)
+# 作者が書いた見本です(網羅的ではなく、極性も目安です)。--user-words で、自分の言葉を足せます。
+# 種類: adj=い形容詞(活用する) / godan=五段動詞 / ichidan=一段動詞 / word=活用しない語
+SLANG = {
+    -1: {
+        "adj": "きもい うざい ださい しんどい だるい めんどくさい うっとうしい 鬱陶しい 気持ち悪い 胸糞悪い しょぼい 小汚い",
+        "godan": "むかつく やらかす ぼったくる 凹む",
+        "ichidan": "萎える 呆れる",
+        "word": "ゴミ クソ くそ 糞 クソゲー ブラック 炎上 地雷 詐欺 ぼったくり サイテー さいてー ガッカリ げんなり イライラ ムカムカ ドン引き クズ カス",
+    },
+    1: {
+        "adj": "エモい 尊い かわいい 可愛い うまい 旨い 美味い",
+        "godan": "",
+        "ichidan": "映える 推せる 萌える",
+        "word": "神対応 神ゲー 神回 神曲 優勝 サイコー ナイス グッド ハッピー ワクワク ウキウキ ほっこり ニコニコ ルンルン ありがたや 感謝感激 ご褒美 天才 最強",
+    },
+}
+MAX_MERGE = 6  # 何個までの形態素を、1つの語にまとめて探すか
+
+
+def _to_kata(s):
+    return "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in s)
+
+
+def _to_hira(s):
+    return "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in s)
+
+
+def _forms_of(variant, kind):
+    if kind == "adj":
+        return adj_i_forms(variant)
+    if kind == "godan":
+        return godan_forms(variant)
+    if kind == "ichidan":
+        return ichidan_forms(variant)
+    return {variant}
+
+
+def _kind_pos(kind):
+    return {"adj": "形容詞", "godan": "動詞", "ichidan": "動詞"}.get(kind, "名詞")
+
+
+def _key(text):
+    """照合用の表記: 全角・半角をそろえ、カタカナをひらがなにする(「ムカつく」「むかつく」「ﾑｶﾂｸ」を同じに扱うため)"""
+    return _to_hira(unicodedata.normalize("NFKC", text))
+
+
+def build_slang(entries=None):
+    """俗語の辞書から、(極性 {基本形: ±1}, 表層形 {照合用の表層形: (基本形, 品詞)}) を作る。
+    entries: [(語, 極性, 種類)]。省略すると、内蔵の SLANG を使う"""
+    if entries is None:
+        entries = [(w, pol, kind) for pol, kinds in SLANG.items() for kind, ws in kinds.items() for w in ws.split()]
+    polarity, forms = {}, {}
+    for word, pol, kind in entries:
+        polarity[word] = pol
+        base_h = _to_hira(word)
+        if kind in ("godan", "ichidan", "adj") and len(base_h) > 1:
+            if kind == "godan" and base_h[-1] not in ROWS:
+                kind = "word"
+        fs = set(_forms_of(base_h, kind))
+        if kind in ("godan", "ichidan"):  # 「バグって」「萎えた」のように、て・た まで1語にしておく(解析器が「って」を1語にするため)
+            for f in list(fs):
+                if kind == "ichidan" and f == base_h[:-1]:
+                    fs |= {f + "て", f + "た"}
+                elif kind == "godan" and f[-1] in "っいし":
+                    fs |= {f + "て", f + "た"}
+                elif kind == "godan" and f[-1] == "ん":
+                    fs |= {f + "で", f + "だ"}
+        for f in fs:
+            forms[_key(f)] = (word, _kind_pos(kind))
+    return polarity, forms
+
+
+DEFAULT_SLANG_FORMS = build_slang()[1]
+
+
+def user_word_entries(path):
+    """利用者の単語ファイルを読む。1行1語: 語<TAB>p|n(ポジ|ネガ|+1|-1)<TAB>(形容詞|五段|一段|なし)
+    種類を書かなければ、かなだけで「い」「イ」で終わる語は形容詞、それ以外は活用しない語として扱う"""
+    kinds = {"形容詞": "adj", "五段": "godan", "一段": "ichidan", "なし": "word", "adj": "adj", "godan": "godan",
+             "ichidan": "ichidan", "word": "word"}
+    entries = []
+    with open(path, encoding="utf-8-sig") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [x for x in line.replace(",", "\t").replace(" ", "\t").split("\t") if x]
+            if len(parts) < 2:
+                continue
+            word, sign = parts[0], _sign(parts[1], 0.5)
+            if not sign:
+                continue
+            kind = kinds.get(parts[2]) if len(parts) > 2 else None
+            if kind is None:
+                kana = all(char_type(c) in ("hira", "kata") or c == "ー" for c in word)
+                kind = "adj" if kana and word[-1] in "いイ" and len(word) > 2 else "word"
+            entries.append((word, sign, kind))
+    return entries
+
+
+def wrap_tokenizer(tokenize, forms):
+    """形態素解析器が細かく割った俗語を、1つの語にまとめる(例: き|も|かっ → きもかっ → 基本形「きもい」)"""
+    if not forms:
+        return tokenize
+
+    def tok(text):
+        tokens = tokenize(text)
+        out, i, n = [], 0, len(tokens)
+        while i < n:
+            hit = None
+            for L in range(min(MAX_MERGE, n - i), 0, -1):
+                joined = _key("".join(t[0] for t in tokens[i:i + L]))
+                if joined in forms:
+                    hit = (L, joined)
+                    break
+            if hit:
+                L, joined = hit
+                base, pos = forms[joined]
+                out.append(("".join(t[0] for t in tokens[i:i + L]), base, pos))
+                i += L
+            else:
+                out.append(tokens[i])
+                i += 1
+        return out
+
+    return tok
+
+
+def suggest_words(lines, tokenize, polarity, top=200, min_count=2):
+    """辞書にない言葉の候補を出す(人が確認して、極性を付けるための一覧)。
+    各語について、出現数と、同じ文にある既知の感情語から推定したポジ寄り・ネガ寄りの文の数を返す"""
+    stats = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens = tokenize(line)
+        _label, total, _hits = judge(tokens, polarity, 1)
+        for surface, base, pos in tokens:
+            if pos not in ("名詞", "形容詞", "動詞", "副詞", "未知語") or base in polarity or surface in polarity:
+                continue
+            if len(base) < 2 or char_type(base[0]) == "punct" or base in EVENT_STOP or base.isdigit():
+                continue
+            st = stats.setdefault(base, [0, 0, 0])
+            st[0] += 1
+            if total > 0:
+                st[1] += 1
+            elif total < 0:
+                st[2] += 1
+    rows = [(w, c, p, n) for w, (c, p, n) in stats.items() if c >= min_count]
+    rows.sort(key=lambda r: (-r[1], r[0]))
+    return rows[:top]
+
+
+def build_lexicon(extra=None, slang=True):
     """polarity: 基本形 -> +1/-1,  surf_map: 表層形 -> (基本形, 品詞)"""
     polarity, surf = {}, {}
 
@@ -123,6 +278,12 @@ def build_lexicon(extra=None):
     for w, b in [("ない", "ない"), ("なかっ", "ない"), ("なく", "ない"),
                  ("ません", "ません"), ("ませ", "ません")]:
         surf[w] = (b, "助動詞")
+    # 俗語・口語(外部辞書より先に入れるので、外部辞書があれば、そちらが優先される)
+    if slang:
+        sp, sf = build_slang()
+        polarity.update(sp)
+        for f, bp in sf.items():
+            surf[f] = bp
     # 外部辞書
     for word, score in (extra or {}).items():
         polarity[word] = 1 if score > 0 else -1
@@ -354,8 +515,9 @@ def builtin_tokenize(text, surf):
 
 
 # ---------------------------------------------------------------- 形態素解析バックエンド
-def make_backend(name, surf):
+def make_backend(name, surf, forms=None):
     order = ["fugashi", "janome", "sudachi", "builtin"] if name == "auto" else [name]
+    forms = DEFAULT_SLANG_FORMS if forms is None else forms
     for n in order:
         try:
             if n == "fugashi":
@@ -369,7 +531,7 @@ def make_backend(name, surf):
                         lemma = (getattr(f, "lemma", None) or w.surface).split("-")[0]
                         res.append((w.surface, lemma, getattr(f, "pos1", "") or ""))
                     return res
-                return "fugashi (MeCab)", tok
+                return "fugashi (MeCab)", wrap_tokenizer(tok, forms)
             if n == "janome":
                 from janome.tokenizer import Tokenizer
                 jt = Tokenizer()
@@ -378,7 +540,7 @@ def make_backend(name, surf):
                     return [(t.surface,
                              t.surface if t.base_form == "*" else t.base_form,
                              t.part_of_speech.split(",")[0]) for t in jt.tokenize(text)]
-                return "janome", tok
+                return "janome", wrap_tokenizer(tok, forms)
             if n == "sudachi":
                 from sudachipy import dictionary, tokenizer as st
                 sd = dictionary.Dictionary().create()
@@ -387,9 +549,9 @@ def make_backend(name, surf):
                 def tok(text, sd=sd, mode=mode):
                     return [(m.surface(), m.dictionary_form(), m.part_of_speech()[0])
                             for m in sd.tokenize(text, mode)]
-                return "sudachipy", tok
+                return "sudachipy", wrap_tokenizer(tok, forms)
             if n == "builtin":
-                return "builtin (簡易トークナイザー)", lambda text: builtin_tokenize(text, surf)
+                return "builtin (簡易トークナイザー)", wrap_tokenizer(lambda text: builtin_tokenize(text, surf), forms)
         except Exception as exc:  # 未インストール・辞書なしなど
             if name != "auto":
                 sys.exit(f"バックエンド {n} を使えません: {exc}")
@@ -870,6 +1032,12 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true", help="形態素の一覧も表示")
     ap.add_argument("--json", action="store_true",
                     help="結果を1行1件の JSON で出力する(他のアプリから呼ぶとき用。状況メッセージは標準エラーへ)")
+    ap.add_argument("--user-words", action="append", default=[], metavar="FILE",
+                    help="自分の言葉の辞書(1行1語: 語<TAB>p|n<TAB>形容詞|五段|一段。複数指定可)。辞書にない言葉を足す")
+    ap.add_argument("--no-slang", action="store_true", help="内蔵の俗語・口語の辞書(きもい・エモい など)を使わない")
+    ap.add_argument("--suggest-words", metavar="文章ファイル",
+                    help="文章のファイル(1行1文)から、辞書にない言葉の候補を集めて保存して終了する(人が確認して、極性を付ける)")
+    ap.add_argument("--suggest-out", default="words_to_review.tsv", help="--suggest-words の保存先(既定 words_to_review.tsv)")
     ap.add_argument("--no-contrast-rule", action="store_true",
                     help="「ネガティブな出来事のあとにポジティブな節」というルールによる皮肉の検出を使わない")
     ap.add_argument("--classifier", metavar="モジュール:関数",
@@ -882,10 +1050,10 @@ def main():
     if args.file:
         with open(args.file, encoding="utf-8-sig") as fh:  # BOM付きUTF-8も読める
             texts += [l.strip() for l in fh if l.strip()]
-    if not texts and not sys.stdin.isatty():
+    if not texts and not args.learn_events and not args.suggest_words and not sys.stdin.isatty():
         texts = [l.strip() for l in sys.stdin if l.strip()]
     interactive = False
-    if not texts and not args.learn_events:
+    if not texts and not args.learn_events and not args.suggest_words:
         if sys.stdin.isatty():
             interactive = True  # 引数なしで端末から起動 → 入力待ちの対話モード
         else:
@@ -922,14 +1090,32 @@ def main():
     if extra:
         credit = f"  辞書: {DICT_CREDIT}" if use_default else ""
         info(f"外部辞書: {len(extra)} 語を読み込みました{source}{credit}")
-    polarity, surf = build_lexicon(extra)
+    polarity, surf = build_lexicon(extra, slang=not args.no_slang)
+    forms = {} if args.no_slang else dict(DEFAULT_SLANG_FORMS)
+    for path in args.user_words:  # 利用者の言葉(辞書にない言葉)
+        user_pol, user_forms = build_slang(user_word_entries(path))
+        polarity.update(user_pol)
+        forms.update(user_forms)
+        for f, bp in user_forms.items():
+            surf[f] = bp
     for word in args.ignore:
         polarity.pop(word, None)
-    name, tokenize = make_backend(args.backend, surf)
+    name, tokenize = make_backend(args.backend, surf, forms)
 
     info(f"バックエンド: {name}")
     if name.startswith("builtin"):
         info("※ 形態素解析器が未インストールのため簡易トークナイザーで動作中です。")
+
+    if args.suggest_words:  # 辞書にない言葉の候補を集める
+        with open(args.suggest_words, encoding="utf-8-sig") as fh:
+            rows = suggest_words(fh, tokenize, polarity)
+        with open(args.suggest_out, "w", encoding="utf-8-sig") as fh:
+            fh.write("# 語\t極性(ここに p か n を書く。要らない行は消す)\t出現数\tポジ寄りの文\tネガ寄りの文\n")
+            for w, c, pc, nc in rows:
+                fh.write(f"{w}\t?\t{c}\t{pc}\t{nc}\n")
+        info(f"辞書にない言葉の候補を {len(rows)} 語、{args.suggest_out} に保存しました。")
+        info("開いて「?」を p(ポジティブ)か n(ネガティブ)に直し、要らない行を消して、--user-words で使います。")
+        return
 
     if args.learn_events:  # 文章のファイルから、ネガティブな出来事を集めて保存する
         learned = learn_events(args.learn_events, tokenize, polarity)
