@@ -200,3 +200,28 @@ class ContrastRuleTests(unittest.TestCase):
         self.assertTrue(ok)
         ok2, _ = pj.check_sarcasm(toks, hits, [], 0.7, polarity=pol, contrast=False)
         self.assertFalse(ok2)
+
+
+class EventPathGuardTests(unittest.TestCase):
+    """出来事との類似による疑いの、誤検出を防ぐ条件"""
+
+    def setUp(self):
+        self.pol, _ = pj.build_lexicon({"最高": 1, "おいしい": 1, "長い": -1, "疲れる": -1, "絶望": -1, "大事": 1})
+        self.ev = [event("待ち時間 長い 疲れる")]
+
+    def run_check(self, toks):
+        _l, _t, hits = pj.judge(toks, self.pol)
+        return pj.check_sarcasm(toks, hits, self.ev, 0.5, polarity=self.pol, contrast=False)
+
+    def test_sarcasm_like_event_is_flagged(self):
+        toks = T("待ち時間|待ち時間|名詞", "が|が|助詞", "長い|長い|形容詞", "疲れる|疲れる|動詞", "なんて|なんて|助詞", "最高|最高|名詞")
+        self.assertTrue(self.run_check(toks)[0])
+
+    def test_concessive_blocks_event_path(self):
+        toks = T("待ち時間|待ち時間|名詞", "は|は|助詞", "長い|長い|形容詞", "疲れる|疲れる|動詞", "けど|けど|助詞", "、|、|記号",
+                 "おいしかっ|おいしい|形容詞", "た|た|助動詞")
+        self.assertFalse(self.run_check(toks)[0])
+
+    def test_net_zero_score_blocks_event_path(self):
+        toks = T("大事|大事|名詞", "な|な|助動詞", "待ち時間|待ち時間|名詞", "長い|長い|形容詞", "疲れる|疲れる|動詞", "絶望|絶望|名詞")
+        self.assertFalse(self.run_check(toks)[0])
