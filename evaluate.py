@@ -46,7 +46,10 @@ def main():
     ap.add_argument("--backend", default="auto")
     ap.add_argument("--no-default-dict", action="store_true")
     ap.add_argument("--errors", action="store_true", help="間違えた文を表示")
+    ap.add_argument("--out", help="結果を UTF-8 のファイルに保存する(PowerShell の > は文字化けするので、こちらを使う)")
     args = ap.parse_args()
+    if args.out:
+        sys.stdout = open(args.out, "w", encoding="utf-8-sig")
 
     extra = {}
     if not args.no_default_dict:
@@ -135,3 +138,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+    if sys.stdout is not sys.__stdout__:
+        sys.stdout.close()
+        sys.stdout = sys.__stdout__
+        print("結果を保存しました。")
