@@ -653,7 +653,80 @@ def event_similarity(tokens, events):
     return best, best_text
 
 
-def check_sarcasm(tokens, hits, events, threshold=0.7, classifier=None, text=""):
+# ---- 状況と評価の対比(ルールによる検出)
+# 鈴木 翔太「レビュー解析精度向上に向けた皮肉検出手法の提案」(修士論文)が使う、
+# Bharti らの situation phrase(出来事・行動)と sentiment phrase(評価・感情)の考え方を、簡易化して取り入れたもの。
+#   文を節に分け、「ネガティブな出来事の節」の後ろに「ポジティブな節」が来て、間が逆接でつながっていなければ、皮肉の可能性ありとする。
+#   逆接(けど・が・のに・でも・しかし)があるときは、「大変だったけど、嬉しい」のような本物の肯定とみなして除く。
+# 論文との違い: CaboCha の文節ではなく、句読点・接続の語で節に分ける。品詞の組み合わせではなく、辞書とネガティブな出来事の見本で極性を決める。
+CONCESSIVE_STARTERS = {"でも", "しかし", "だけど", "だけれど", "けれど", "けれども", "それでも", "ところが", "とはいえ", "ただ", "が"}
+SPLIT_PUNCT = set("\u3002\uff01\uff1f!?\u3001\uff0c,\n")  # 。！？!?、，, と改行
+SENTENCE_END = set("\u3002\uff01\uff1f!?\n")
+
+
+def split_clauses(tokens):
+    """節に分ける。戻り値: [(開始, 終了(含まない), 前の節との関係)]
+    関係: start / sentence(。で区切り) / comma(、で区切り) / concessive(逆接) / cause(ので・から)"""
+    clauses, start, link = [], 0, "start"
+    n = len(tokens)
+    last_contrast = last_contrast_index(tokens)
+    i = 0
+    while i < n:
+        surface, _base, pos = tokens[i]
+        nxt_link = None
+        if surface and surface[0] in SPLIT_PUNCT and char_type(surface[0]) == "punct":
+            nxt_link = "sentence" if surface[0] in SENTENCE_END else "comma"
+        elif surface in CONTRAST_WORDS or (surface == "が" and i == last_contrast):
+            nxt_link = "concessive"
+        elif surface in ("ので", "から") and i > 0 and tokens[i - 1][2] in ("動詞", "形容詞", "助動詞"):
+            nxt_link = "cause"
+        if nxt_link:
+            if i + 1 > start:
+                clauses.append((start, i + 1, link))
+            start, link = i + 1, nxt_link
+        i += 1
+    if start < n:
+        clauses.append((start, n, link))
+    # 文頭の「でも」「しかし」などは、前との関係を逆接にする
+    fixed = []
+    for s_, e_, lk in clauses:
+        first = next((t for t in tokens[s_:e_] if char_type(t[0][0]) != "punct"), None) if e_ > s_ else None
+        if first and first[0] in CONCESSIVE_STARTERS and lk != "start":
+            lk = "concessive"
+        fixed.append((s_, e_, lk))
+    return fixed
+
+
+def contrast_sarcasm(tokens, polarity, events=(), clause_threshold=0.5):
+    """「ネガティブな出来事の節」→「ポジティブな節」の対比があるか。戻り値: (ネガティブな節の文字列, ポジティブな節の文字列) または None"""
+    clauses = split_clauses(tokens)
+    infos = []
+    for s_, e_, lk in clauses:
+        seg = tokens[s_:e_]
+        text = "".join(t[0] for t in seg if char_type(t[0][0]) != "punct") if seg else ""
+        _label, total, _hits = judge(seg, polarity, 1)
+        neg = total < 0
+        if not neg and events:
+            sim, _ev = event_similarity(seg, events)
+            neg = sim >= clause_threshold and total <= 0
+        infos.append((text, total, neg, lk))
+    for j in range(len(infos) - 1, 0, -1):
+        text_j, total_j, _neg_j, _lk_j = infos[j]
+        if total_j <= 0:
+            continue
+        # j の前へさかのぼる。逆接にぶつかったら、そこから先は対比とみなさない
+        k = j
+        while k > 0:
+            if infos[k][3] == "concessive":
+                break
+            k -= 1
+            if infos[k][2]:
+                return infos[k][0], text_j
+    return None
+
+
+def check_sarcasm(tokens, hits, events, threshold=0.7, classifier=None, text="", polarity=None, contrast=True,
+                  clause_threshold=0.5):
     """皮肉の可能性があるか。ポジティブな表現があり、かつ、皮肉の目印か、ネガティブな出来事との類似がある場合。
     classifier: 任意。文字列を受け取り 0〜1 の「皮肉らしさ」を返す関数(BERT などの学習済みモデルをつなぐ口)。0.5以上で根拠に加える。
     戻り値: (可能性あり?, 理由のリスト)"""
@@ -671,6 +744,10 @@ def check_sarcasm(tokens, hits, events, threshold=0.7, classifier=None, text="")
         best, ev_text = event_similarity(tokens, events)
     if best >= threshold:
         reasons.append(f"ネガティブな出来事「{ev_text}」に似ている(類似度 {best:.2f})")
+    if contrast and polarity is not None:
+        found = contrast_sarcasm(tokens, polarity, events, clause_threshold)
+        if found:
+            reasons.append(f"ネガティブな出来事「{found[0]}」のあとに、ポジティブな表現「{found[1]}」が続いている")
     if classifier is not None and text:
         try:
             score = float(classifier(text))
@@ -690,7 +767,8 @@ def analyze(text, tokenize, polarity, contrast_weight=2, sarcasm=None):
     surface_label, reasons, suspected = label, [], False
     if sarcasm and sarcasm["mode"] != "off" and total >= 0:
         suspected, reasons = check_sarcasm(tokens, hits, sarcasm["events"], sarcasm["threshold"],
-                                           sarcasm.get("classifier"), text)
+                                           sarcasm.get("classifier"), text, polarity,
+                                           sarcasm.get("contrast", True), sarcasm.get("clause_threshold", 0.5))
         if suspected:
             label = "ネガティブ(皮肉の可能性)" if sarcasm["mode"] == "negative" else "皮肉の可能性あり"
     return {
@@ -785,6 +863,8 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true", help="形態素の一覧も表示")
     ap.add_argument("--json", action="store_true",
                     help="結果を1行1件の JSON で出力する(他のアプリから呼ぶとき用。状況メッセージは標準エラーへ)")
+    ap.add_argument("--no-contrast-rule", action="store_true",
+                    help="「ネガティブな出来事のあとにポジティブな節」というルールによる皮肉の検出を使わない")
     ap.add_argument("--classifier", metavar="モジュール:関数",
                     help="皮肉らしさ(0〜1)を返す関数をつなぐ。例: mymodel:predict(BERT などの学習済みモデル用)")
     args = ap.parse_args()
@@ -852,7 +932,8 @@ def main():
         info(f"ネガティブな出来事を {len(learned)} 件集めて、{args.events_out} に保存しました")
         return
 
-    sarcasm = {"mode": args.sarcasm, "events": [], "threshold": args.event_threshold, "classifier": None}
+    sarcasm = {"mode": args.sarcasm, "events": [], "threshold": args.event_threshold, "classifier": None,
+               "contrast": not args.no_contrast_rule}
     if args.classifier:
         import importlib
         mod_name, _, func_name = args.classifier.partition(":")
