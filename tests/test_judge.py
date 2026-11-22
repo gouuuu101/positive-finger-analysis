@@ -147,3 +147,56 @@ class EventLearningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContrastRuleTests(unittest.TestCase):
+    """「ネガティブな出来事のあとにポジティブな節」というルール(鈴木 修士論文の考え方の簡易版)"""
+
+    def pol(self):
+        pol, _ = pj.build_lexicon({"最高": 1, "嬉しい": 1, "うるさい": -1, "遅れる": -1, "疲れる": -1, "おいしい": 1})
+        return pol
+
+    def test_sarcasm_sentence_break(self):
+        # 電車が遅れた。最高だね。 → 皮肉の可能性
+        toks = T("電車|電車|名詞", "が|が|助詞", "遅れ|遅れる|動詞", "た|た|助動詞", "。|。|記号",
+                 "最高|最高|名詞", "だ|だ|助動詞", "ね|ね|助詞", "。|。|記号")
+        self.assertIsNotNone(pj.contrast_sarcasm(toks, self.pol()))
+
+    def test_sarcasm_comma(self):
+        toks = T("隣|隣|名詞", "が|が|助詞", "うるさい|うるさい|形容詞", "、|、|記号", "最高|最高|名詞", "だ|だ|助動詞")
+        self.assertIsNotNone(pj.contrast_sarcasm(toks, self.pol()))
+
+    def test_genuine_after_hardship_with_concessive(self):
+        # 待ち時間は疲れたけど、おいしかった → 本物の肯定(逆接)
+        toks = T("疲れ|疲れる|動詞", "た|た|助動詞", "けど|けど|助詞", "、|、|記号", "おいしかっ|おいしい|形容詞", "た|た|助動詞")
+        self.assertIsNone(pj.contrast_sarcasm(toks, self.pol()))
+
+    def test_genuine_after_hardship_with_sentence_start_conjunction(self):
+        toks = T("疲れ|疲れる|動詞", "た|た|助動詞", "。|。|記号", "でも|でも|接続詞", "、|、|記号", "嬉しい|嬉しい|形容詞")
+        self.assertIsNone(pj.contrast_sarcasm(toks, self.pol()))
+
+    def test_positive_only_and_negative_only(self):
+        self.assertIsNone(pj.contrast_sarcasm(T("嬉しい|嬉しい|形容詞", "。|。|記号"), self.pol()))
+        self.assertIsNone(pj.contrast_sarcasm(T("疲れ|疲れる|動詞", "た|た|助動詞", "。|。|記号"), self.pol()))
+
+    def test_negated_positive_is_not_positive(self):
+        # うるさい。嬉しくない。 → 後ろは否定されているのでポジティブではない
+        toks = T("うるさい|うるさい|形容詞", "。|。|記号", "嬉しく|嬉しい|形容詞", "ない|ない|助動詞", "。|。|記号")
+        self.assertIsNone(pj.contrast_sarcasm(toks, self.pol()))
+
+    def test_event_database_marks_negative_clause(self):
+        # 辞書にない出来事でも、見本と似ていればネガティブな節になる
+        toks = T("傘|傘|名詞", "を|を|助詞", "忘れ|忘れる|動詞", "た|た|助動詞", "。|。|記号",
+                 "最高|最高|名詞", "だ|だ|助動詞", "。|。|記号")
+        ev = [event("傘 忘れる")]
+        self.assertIsNone(pj.contrast_sarcasm(toks, self.pol()))
+        self.assertIsNotNone(pj.contrast_sarcasm(toks, self.pol(), ev))
+
+    def test_check_sarcasm_uses_rule(self):
+        toks = T("電車|電車|名詞", "が|が|助詞", "遅れ|遅れる|動詞", "た|た|助動詞", "。|。|記号", "最高|最高|名詞")
+        pol = self.pol()
+        _l, _t, hits = pj.judge(toks, pol)
+        ok, reasons = pj.check_sarcasm(toks, hits, [], 0.7, polarity=pol)
+        self.assertTrue(ok)
+        ok2, _ = pj.check_sarcasm(toks, hits, [], 0.7, polarity=pol, contrast=False)
+        self.assertFalse(ok2)
