@@ -72,10 +72,15 @@ def main():
     if os.path.exists(args.events_corpus):
         with open(args.events_corpus, encoding="utf-8-sig") as fh:
             lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
-    events = pj.build_events(tokenize, True, (), lines)
-    print(f"ネガティブな出来事: {len(events)} 件(見本 + 学習用文章 {len(lines)} 行)\n")
+    learned = pj.learn_events_from_lines(lines, tokenize, polarity)  # 「出来事 + 接続 + ネガティブな感情」の形の文だけから取り出す
+    events = pj.build_events(tokenize, True, (), learned)
+    print(f"ネガティブな出来事: {len(events)} 件(見本 + 学習用文章 {len(lines)} 行から {len(learned)} 件を抽出)\n")
 
     rows = load_rows(args.data)
+    eval_texts = {r["text"].strip() for r in rows}
+    overlap = [l for l in lines if l in eval_texts]
+    if overlap:
+        print(f"※ 警告: 学習用文章のうち {len(overlap)} 行が、評価データと同じ文です。数値が実際より良く出ます。")
     cache = {}
 
     def tok(text):
